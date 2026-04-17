@@ -2,7 +2,6 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-14%2B-black)](https://www.apple.com/macos/)
-[![Linux](https://img.shields.io/badge/Linux-supported-green)]()
 
 Use `mmctl` with SSO — no Personal Access Token needed.
 
@@ -39,10 +38,10 @@ This interactively configures your server URL, compiles the cookie reader (if ne
 
 ## Prerequisites
 
-- **macOS** (primary) or **Linux** (Python fallback for cookie reading)
+- **macOS**
 - **Google Chrome** with an active Mattermost login (SSO)
 - **mmctl** — `brew install mmctl` or [download from Mattermost](https://releases.mattermost.com/mmctl/)
-- **Swift 5.9+** for building `cookie-reader` from source (macOS only; included with Xcode CLI Tools)
+- **Swift 5.9+** for building `cookie-reader` from source (included with Xcode Command Line Tools)
 
 ## Usage
 
@@ -108,8 +107,6 @@ Click **Always Allow**. This grants access only to the `cookie-reader` binary �
 ### No cron, no background process
 
 Token refresh happens lazily — only when you run an `mmsso` command and the current token is older than 1 hour. There's no daemon, no cron job, no polling. As long as you have an active Mattermost session in Chrome (a tab open or recently visited), `mmsso` handles everything automatically.
-
-On Linux, a Python fallback using [pycookiecheat](https://github.com/n8henrie/pycookiecheat) is available (auto-managed venv, no manual setup).
 
 ## When It Breaks
 

@@ -22,23 +22,24 @@ echo ""
 
 mkdir -p "$INSTALL_DIR"
 
-# Build cookie-reader from Swift source (macOS)
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  if command -v swiftc >/dev/null 2>&1; then
-    echo "  ▸ Compiling cookie-reader ..."
-    cd "$SCRIPT_DIR"
-    make build 2>&1 | sed 's/^/    /'
-    cp cookie-reader "${INSTALL_DIR}/cookie-reader"
-    chmod +x "${INSTALL_DIR}/cookie-reader"
-    echo "  ✓ ${INSTALL_DIR}/cookie-reader"
-  else
-    echo "  ! swiftc not found — skipping cookie-reader."
-    echo "    Install Xcode Command Line Tools: xcode-select --install"
-    echo "    Without it, mmsso falls back to Python/pycookiecheat."
-  fi
-else
-  echo "  • cookie-reader requires macOS (Keychain). Python fallback will be used on Linux."
+# macOS-only — cookie-reader reads Chrome's Keychain-encrypted cookies
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "  ! mmsso is macOS-only." >&2
+  exit 1
 fi
+
+if ! command -v swiftc >/dev/null 2>&1; then
+  echo "  ! swiftc not found — install Xcode Command Line Tools:" >&2
+  echo "    xcode-select --install" >&2
+  exit 1
+fi
+
+echo "  ▸ Compiling cookie-reader ..."
+cd "$SCRIPT_DIR"
+make build 2>&1 | sed 's/^/    /'
+cp cookie-reader "${INSTALL_DIR}/cookie-reader"
+chmod +x "${INSTALL_DIR}/cookie-reader"
+echo "  ✓ ${INSTALL_DIR}/cookie-reader"
 
 # Install mmsso wrapper
 cp "${SCRIPT_DIR}/mmsso" "${INSTALL_DIR}/mmsso"
