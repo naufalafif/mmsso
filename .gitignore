@@ -1,3 +1,6 @@
+# Build artifacts
+cookie-reader
+
 # Python
 .venv/
 __pycache__/

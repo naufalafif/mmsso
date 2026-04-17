@@ -29,6 +29,21 @@ MM_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REFRESH_SCRIPT="${MM_SCRIPT_DIR}/refresh-token.py"
 TOKEN_MAX_AGE_SECONDS=3600  # refresh if older than 1 hour
 
+# ── Cookie reader discovery ──────────────────────────────────────────────────
+# Prefer the compiled Swift binary (Keychain permission scopes to it, not the terminal).
+# Fall back to Python/pycookiecheat if the binary isn't available.
+find_cookie_reader() {
+  local bin_name="cookie-reader"
+  if [[ -x "${MM_SCRIPT_DIR}/${bin_name}" ]]; then
+    echo "${MM_SCRIPT_DIR}/${bin_name}"
+  elif command -v "$bin_name" >/dev/null 2>&1; then
+    command -v "$bin_name"
+  else
+    echo ""
+  fi
+}
+COOKIE_READER="$(find_cookie_reader)"
+
 # ── Colors & formatting ─────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
   RED='\033[0;31m'
@@ -144,6 +159,65 @@ ensure_venv() {
 
 # ── Token refresh ────────────────────────────────────────────────────────────
 
+show_no_session_error() {
+  echo "" >&2
+  fail "No active Mattermost session found in Chrome."
+  echo "" >&2
+  echo -e "  ${BOLD}To fix this:${RESET}" >&2
+  echo -e "  1. Open ${BLUE}${MM_URL}${RESET} in Google Chrome" >&2
+  echo -e "  2. Log in via SSO (if prompted)" >&2
+  echo -e "  3. Wait for the Mattermost UI to fully load" >&2
+  echo -e "  4. Come back here and run: ${BOLD}mm refresh${RESET}" >&2
+  echo "" >&2
+}
+
+show_chrome_error() {
+  echo "" >&2
+  fail "Cannot read Chrome's cookie store."
+  echo "" >&2
+  echo -e "  ${BOLD}Common causes:${RESET}" >&2
+  echo -e "  • Chrome is not installed" >&2
+  echo -e "  • Chrome has never been opened (no cookie database yet)" >&2
+  echo -e "  • macOS Keychain denied access — look for a system prompt" >&2
+  echo -e "    asking to allow access to \"Chrome Safe Storage\"" >&2
+  echo -e "    and click ${BOLD}Always Allow${RESET}" >&2
+  echo "" >&2
+}
+
+refresh_via_binary() {
+  local domain
+  domain="$(echo "$MM_URL" | sed -E 's|https?://||' | sed 's|/.*||')"
+
+  local token
+  token=$("$COOKIE_READER" "$domain" "MMAUTHTOKEN" 2>/dev/null) || return 1
+
+  if [[ -z "$token" ]]; then
+    return 1
+  fi
+
+  mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR"
+  printf '%s' "$token" > "$TOKEN_FILE"
+  chmod 600 "$TOKEN_FILE"
+
+  ok "Token refreshed (${#token} chars) → ${TOKEN_FILE}"
+}
+
+refresh_via_python() {
+  ensure_venv || return 1
+
+  if [[ ! -f "$REFRESH_SCRIPT" ]]; then
+    fail "refresh-token.py not found at: $REFRESH_SCRIPT"
+    hint "Install the compiled binary instead: make install"
+    return 1
+  fi
+
+  local output
+  output=$("${VENV_DIR}/bin/python3" "$REFRESH_SCRIPT" --url "$MM_URL" 2>&1) || return 1
+
+  echo "$output" | grep -i "refreshed" | sed "s/^/$(printf "${GREEN}✓${RESET} ")/" || true
+}
+
 do_refresh() {
   local force="${1:-false}"
 
@@ -163,52 +237,45 @@ do_refresh() {
     fi
   fi
 
-  ensure_venv || return 1
+  # Try the compiled Swift binary first (preferred — Keychain scoped to it)
+  if [[ -n "$COOKIE_READER" && -x "$COOKIE_READER" ]]; then
+    local err
+    err=$("$COOKIE_READER" "$(echo "$MM_URL" | sed -E 's|https?://||' | sed 's|/.*||')" "MMAUTHTOKEN" 2>&1 1>/dev/null) || true
 
-  if [[ ! -f "$REFRESH_SCRIPT" ]]; then
-    fail "refresh-token.py not found at: $REFRESH_SCRIPT"
-    hint "Re-clone the mmctl-setup repo or check your installation."
+    if refresh_via_binary 2>/dev/null; then
+      return 0
+    fi
+
+    # Binary failed — check why
+    if echo "$err" | grep -qi "not found in Chrome\|cookie not found"; then
+      show_no_session_error
+    elif echo "$err" | grep -qi "Keychain\|denied\|not found in Keychain"; then
+      show_chrome_error
+    else
+      fail "Token refresh failed."
+      echo "$err" | grep -i "ERROR" | sed 's/^/  /' >&2
+    fi
     return 1
   fi
 
-  local output
-  output=$("${VENV_DIR}/bin/python3" "$REFRESH_SCRIPT" --url "$MM_URL" 2>&1) || {
-    local exit_code=$?
+  # Fall back to Python/pycookiecheat
+  if refresh_via_python; then
+    return 0
+  fi
 
-    # Parse the error to give actionable guidance
-    if echo "$output" | grep -qi "MMAUTHTOKEN not found"; then
-      echo "" >&2
-      fail "No active Mattermost session found in Chrome."
-      echo "" >&2
-      echo -e "  ${BOLD}To fix this:${RESET}" >&2
-      echo -e "  1. Open ${BLUE}${MM_URL}${RESET} in Google Chrome" >&2
-      echo -e "  2. Log in via SSO (if prompted)" >&2
-      echo -e "  3. Wait for the Mattermost UI to fully load" >&2
-      echo -e "  4. Come back here and run: ${BOLD}mm refresh${RESET}" >&2
-      echo "" >&2
-    elif echo "$output" | grep -qi "could not read"; then
-      echo "" >&2
-      fail "Cannot read Chrome's cookie store."
-      echo "" >&2
-      echo -e "  ${BOLD}Common causes:${RESET}" >&2
-      echo -e "  • Chrome is not installed" >&2
-      echo -e "  • Chrome has never been opened (no cookie database yet)" >&2
-      echo -e "  • macOS Keychain denied access — look for a system prompt" >&2
-      echo -e "    asking to allow access to \"Chrome Safe Storage\"" >&2
-      echo -e "    and click ${BOLD}Always Allow${RESET}" >&2
-      echo "" >&2
-    else
-      fail "Token refresh failed."
-      # Only show lines that don't contain potential token data
-      echo "$output" | grep -i "ERROR\|error\|failed\|not found\|denied" | sed 's/^/  /' >&2
-      hint "Run with MM_DEBUG=1 mm refresh for full output."
-    fi
+  # Python also failed — show guidance
+  local py_err
+  py_err=$("${VENV_DIR}/bin/python3" "$REFRESH_SCRIPT" --url "$MM_URL" 2>&1) || true
 
-    return $exit_code
-  }
-
-  # Show the success line from the Python script
-  echo "$output" | grep -i "refreshed" | sed "s/^/$(printf "${GREEN}✓${RESET} ")/" || true
+  if echo "$py_err" | grep -qi "MMAUTHTOKEN not found"; then
+    show_no_session_error
+  elif echo "$py_err" | grep -qi "could not read"; then
+    show_chrome_error
+  else
+    fail "Token refresh failed."
+    echo "$py_err" | grep -i "ERROR\|error\|failed\|denied" | sed 's/^/  /' >&2
+  fi
+  return 1
 }
 
 # ── Commands ─────────────────────────────────────────────────────────────────
@@ -237,14 +304,20 @@ cmd_setup() {
     return 1
   fi
 
-  # 2. Check Python
-  info "Checking for Python 3 ..."
-  if command -v python3 >/dev/null 2>&1; then
-    ok "Found $(python3 --version 2>&1)"
+  # 2. Check cookie-reader (Swift binary preferred, Python fallback)
+  COOKIE_READER="$(find_cookie_reader)"
+  if [[ -n "$COOKIE_READER" ]]; then
+    ok "Found cookie-reader at ${COOKIE_READER} (Keychain permission scoped to this binary)"
   else
-    fail "Python 3 is required for auto token refresh."
-    hint "Install it: brew install python3"
-    return 1
+    info "cookie-reader binary not found — checking Python fallback ..."
+    if command -v python3 >/dev/null 2>&1; then
+      ok "Found $(python3 --version 2>&1) (will use pycookiecheat)"
+      hint "For better Keychain security, install via: brew install naufalafif/tap/mmsso"
+    else
+      fail "Neither cookie-reader binary nor Python 3 found."
+      hint "Install via: brew install naufalafif/tap/mmsso"
+      return 1
+    fi
   fi
 
   # 3. Check Chrome

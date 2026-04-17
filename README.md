@@ -15,30 +15,43 @@ If your Mattermost server enforces SSO, `mmctl` can't log in directly — it onl
 - **Auto-refresh** — token is refreshed transparently before each command if stale (>1 hour)
 - **Zero manual steps** — as long as you have an active Mattermost session in Chrome
 - **Drop-in replacement** — all `mmctl` commands work: `mm team list`, `mm post list`, etc.
-- **Interactive setup** — `mm setup` guides you through first-time configuration
+- **Secure Keychain access** — compiled Swift binary for cookie reading; macOS Keychain permission scopes to `cookie-reader` specifically, not your terminal app
 
 ## Install
+
+### Homebrew (recommended)
+
+```bash
+brew tap naufalafif/tap
+brew install mmsso
+```
+
+### From source
+
+Requires Swift 5.9+ (Xcode Command Line Tools) and `mmctl`.
 
 ```bash
 git clone https://github.com/naufalafif/mmsso.git
 cd mmsso
-./install.sh
+make build
+make install          # installs to ~/bin by default
+# make install PREFIX=/usr/local  # or install system-wide
 ```
 
-This copies `mm` and `refresh-token.py` to `~/bin/`. If `mmctl` isn't installed, the script offers to install it via Homebrew.
-
-Then run the interactive setup:
+### First-time setup
 
 ```bash
 mm setup
 ```
 
-### Prerequisites
+This interactively configures your server URL, compiles the cookie reader (if needed), and tests the connection.
 
-- **macOS** or **Linux**
+## Prerequisites
+
+- **macOS** (primary) or **Linux** (Python fallback for cookie reading)
 - **Google Chrome** with an active Mattermost login (SSO)
-- **Python 3** (venv is auto-managed on first run)
 - **mmctl** — `brew install mmctl` or [download from Mattermost](https://releases.mattermost.com/mmctl/)
+- **Swift 5.9+** for building `cookie-reader` from source (macOS only; included with Xcode CLI Tools)
 
 ## Usage
 
@@ -65,23 +78,21 @@ mm user search <user-id-or-username> --json
 ```
 Chrome (SSO login) → encrypted cookie DB on disk
                            ↓
-                     pycookiecheat (decrypts via Keychain)
+                     cookie-reader (Swift binary)
+                     reads Keychain + decrypts cookie
                            ↓
-                     ~/.config/mm/token
+                     ~/.config/mm/token (chmod 600)
                            ↓
                      mmctl (authenticated)
 ```
 
-1. You log into Mattermost in Chrome via SSO (as usual)
-2. `mm` reads the `MMAUTHTOKEN` cookie from Chrome's encrypted cookie store using [pycookiecheat](https://github.com/n8henrie/pycookiecheat)
-3. Writes the token to `~/.config/mm/token` (chmod 600)
-4. Passes through to `mmctl` with the fresh token
+On macOS, `cookie-reader` is a compiled Swift binary that reads Chrome's cookie encryption key from the macOS Keychain and decrypts the cookie from Chrome's SQLite database. macOS Keychain scopes the "Always Allow" permission to this specific binary — not your terminal app — so other processes can't piggyback on the access.
 
-First run may prompt for macOS Keychain access to "Chrome Safe Storage" — click **Always Allow**.
+On Linux, a Python fallback using [pycookiecheat](https://github.com/n8henrie/pycookiecheat) is available (auto-managed venv, no manual setup).
 
 ## When It Breaks
 
-If you get auth errors, it means Chrome doesn't have a valid Mattermost session:
+If you get auth errors, Chrome doesn't have a valid Mattermost session:
 
 1. Open your Mattermost server in Chrome
 2. Let SSO log you in
@@ -89,13 +100,13 @@ If you get auth errors, it means Chrome doesn't have a valid Mattermost session:
 
 ## Configuration
 
-All config is stored in `~/.config/mm/`:
+All config stored in `~/.config/mm/`:
 
 | File | Purpose |
 |------|---------|
 | `config` | Server URL + auth name |
 | `token` | Session token (auto-managed, chmod 600) |
-| `.venv/` | Python venv (auto-managed) |
+| `.venv/` | Python venv for fallback (auto-managed) |
 
 ## Limitations
 
@@ -107,15 +118,11 @@ Both require a Personal Access Token + direct REST API access.
 ## Uninstall
 
 ```bash
-./uninstall.sh
+make uninstall        # removes from ~/bin
+rm -rf ~/.config/mm   # removes config + token
 ```
 
-Or manually:
-
-```bash
-rm ~/bin/mm ~/bin/refresh-token.py
-rm -rf ~/.config/mm
-```
+Or via Homebrew: `brew uninstall mmsso`
 
 ## Contributing
 
