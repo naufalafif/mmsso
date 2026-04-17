@@ -136,6 +136,25 @@ All config stored in `~/.config/mmsso/`:
 
 Both require a Personal Access Token + direct REST API access.
 
+## Use with Claude Code
+
+The repo includes a [Claude Code](https://claude.com/claude-code) skill that teaches Claude how to drive `mmsso` effectively — summarizing channels, reconstructing threads, resolving user IDs, etc.
+
+Install the skill:
+
+```bash
+mkdir -p ~/.claude/skills/mmsso
+cp claude-skill/SKILL.md ~/.claude/skills/mmsso/SKILL.md
+```
+
+Then in Claude Code, just mention Mattermost naturally:
+
+> *"Summarize the last 24h in #engineering-bulletin"*
+> *"Who sent post ID xxx?"*
+> *"Show me threads from yesterday in the incidents channel"*
+
+Claude auto-invokes the skill, runs the right `mmsso` commands, and resolves IDs to usernames before reporting.
+
 ## Uninstall
 
 ```bash
