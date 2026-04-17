@@ -4,18 +4,9 @@
 [![macOS](https://img.shields.io/badge/macOS-14%2B-black)](https://www.apple.com/macos/)
 [![Linux](https://img.shields.io/badge/Linux-supported-green)]()
 
-A drop-in wrapper around [mmctl](https://docs.mattermost.com/administration-guide/manage/mmctl-command-line-tool.html) that **automatically refreshes SSO session tokens** from Chrome's cookie store. No passwords, no Personal Access Tokens, no manual DevTools copy-paste.
+Use `mmctl` with SSO — no Personal Access Token needed.
 
-Works with **any self-hosted Mattermost server** that uses SSO/OAuth/SAML authentication.
-
-## Overview
-
-If your Mattermost server enforces SSO, `mmctl` can't log in directly — it only supports username/password or PATs. `mmsso` solves this by reading your active browser session from Chrome's encrypted cookie database on disk, so you never have to touch DevTools or clipboard again.
-
-- **Auto-refresh** — token is refreshed transparently before each command if stale (>1 hour)
-- **Zero manual steps** — as long as you have an active Mattermost session in Chrome
-- **Drop-in replacement** — all `mmctl` commands work: `mm team list`, `mm post list`, etc.
-- **Secure Keychain access** — compiled Swift binary for cookie reading; macOS Keychain permission scopes to `cookie-reader` specifically, not your terminal app
+`mmctl` doesn't support SSO login. If your Mattermost server enforces SSO, you're stuck. `mmsso` fixes that by reusing your existing Chrome session, so you can use `mmctl` without asking IT for a PAT.
 
 ## Install
 
