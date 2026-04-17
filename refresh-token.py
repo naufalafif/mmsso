@@ -36,9 +36,9 @@ def refresh(url: str):
     token_dir = os.path.dirname(TOKEN_FILE)
     os.makedirs(token_dir, exist_ok=True)
     os.chmod(token_dir, 0o700)
-    with open(TOKEN_FILE, "w") as f:
+    fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         f.write(token)
-    os.chmod(TOKEN_FILE, 0o600)
 
     print(f"Token refreshed ({len(token)} chars) → {TOKEN_FILE}")
 
