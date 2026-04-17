@@ -75,18 +75,48 @@ mm user search <user-id-or-username> --json
 
 ## How It Works
 
+When you log into Mattermost via SSO in Chrome, Chrome stores your session token in a cookie called `MMAUTHTOKEN`. Chrome encrypts all cookies before saving them to disk, and the encryption key lives in the macOS Keychain under "Chrome Safe Storage".
+
+`mmsso` reads that encrypted cookie and decrypts it so `mmctl` can use it:
+
 ```
-Chrome (SSO login) → encrypted cookie DB on disk
-                           ↓
-                     cookie-reader (Swift binary)
-                     reads Keychain + decrypts cookie
-                           ↓
-                     ~/.config/mm/token (chmod 600)
-                           ↓
-                     mmctl (authenticated)
+┌─────────────────────────────────────────────────┐
+│  You log into Mattermost via SSO in Chrome      │
+│  → Chrome saves MMAUTHTOKEN cookie (encrypted)  │
+│  → Encryption key stored in macOS Keychain       │
+└─────────────────────┬───────────────────────────┘
+                      │
+        ┌─────────────▼──────────────┐
+        │  You run: mm team list     │
+        └─────────────┬──────────────┘
+                      │
+        ┌─────────────▼──────────────┐
+        │  cookie-reader (Swift)     │
+        │  1. Reads encryption key   │
+        │     from macOS Keychain    │
+        │  2. Opens Chrome's cookie  │
+        │     database (SQLite)      │
+        │  3. Decrypts the cookie    │
+        └─────────────┬──────────────┘
+                      │
+        ┌─────────────▼──────────────┐
+        │  Token written to          │
+        │  ~/.config/mm/token        │
+        │  → mmctl runs your command │
+        └────────────────────────────┘
 ```
 
-On macOS, `cookie-reader` is a compiled Swift binary that reads Chrome's cookie encryption key from the macOS Keychain and decrypts the cookie from Chrome's SQLite database. macOS Keychain scopes the "Always Allow" permission to this specific binary — not your terminal app — so other processes can't piggyback on the access.
+### Why it needs Keychain access
+
+Chrome encrypts cookies with a key stored in the macOS Keychain. To decrypt your session token, `cookie-reader` needs to read that key. The first time you run it, macOS will show a prompt:
+
+> "cookie-reader" wants to use your confidential information stored in "Chrome Safe Storage" in your keychain.
+
+Click **Always Allow**. This grants access only to the `cookie-reader` binary — not your terminal, not other apps. The permission is scoped to this specific binary's code signature.
+
+### No cron, no background process
+
+Token refresh happens lazily — only when you run an `mm` command and the current token is older than 1 hour. There's no daemon, no cron job, no polling. As long as you have an active Mattermost session in Chrome (a tab open or recently visited), `mm` handles everything automatically.
 
 On Linux, a Python fallback using [pycookiecheat](https://github.com/n8henrie/pycookiecheat) is available (auto-managed venv, no manual setup).
 
