@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Install mmsso (mm + cookie-reader) to ~/bin/
+# Install mmsso (mmsso + cookie-reader) to ~/bin/
 #
 # Usage:
 #   ./install.sh              # build from source + install
@@ -8,7 +8,7 @@
 #
 # What it does:
 #   1. Compiles cookie-reader from Swift source (macOS only)
-#   2. Copies mm and cookie-reader to ~/bin/
+#   2. Copies mmsso and cookie-reader to ~/bin/
 #   3. Tells you to run: mm setup
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -34,16 +34,16 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   else
     echo "  ! swiftc not found — skipping cookie-reader."
     echo "    Install Xcode Command Line Tools: xcode-select --install"
-    echo "    Without it, mm falls back to Python/pycookiecheat."
+    echo "    Without it, mmsso falls back to Python/pycookiecheat."
   fi
 else
   echo "  • cookie-reader requires macOS (Keychain). Python fallback will be used on Linux."
 fi
 
-# Install mm wrapper
-cp "${SCRIPT_DIR}/mm" "${INSTALL_DIR}/mm"
-chmod +x "${INSTALL_DIR}/mm"
-echo "  ✓ ${INSTALL_DIR}/mm"
+# Install mmsso wrapper
+cp "${SCRIPT_DIR}/mmsso" "${INSTALL_DIR}/mmsso"
+chmod +x "${INSTALL_DIR}/mmsso"
+echo "  ✓ ${INSTALL_DIR}/mmsso"
 
 # Install Python fallback
 cp "${SCRIPT_DIR}/refresh-token.py" "${INSTALL_DIR}/refresh-token.py"
@@ -65,7 +65,7 @@ else
   if [[ "$yn" =~ ^[Yy]$ ]]; then
     brew install mmctl
   else
-    echo "  • Skipped. Install mmctl before running mm setup."
+    echo "  • Skipped. Install mmctl before running mmsso setup."
   fi
 fi
 
@@ -78,5 +78,5 @@ fi
 
 echo ""
 echo "  Done! Now run:"
-echo "    mm setup"
+echo "    mmsso setup"
 echo ""

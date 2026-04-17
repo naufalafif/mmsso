@@ -6,14 +6,14 @@
 set -euo pipefail
 
 echo "About to remove:"
-[[ -f "${HOME}/bin/mm" ]]              && echo "  - ~/bin/mm"
+[[ -f "${HOME}/bin/mmsso" ]]              && echo "  - ~/bin/mmsso"
 [[ -f "${HOME}/bin/refresh-token.py" ]] && echo "  - ~/bin/refresh-token.py"
-[[ -f "${HOME}/bin/mmctl" ]]           && echo "  - ~/bin/mmctl"
-[[ -d "${HOME}/.config/mm" ]]          && echo "  - ~/.config/mm/ (config + token + venv)"
-[[ -d "${HOME}/.config/mmctl" ]]       && echo "  - ~/.config/mmctl/ (legacy config)"
+[[ -f "${HOME}/bin/mmssoctl" ]]           && echo "  - ~/bin/mmssoctl"
+[[ -d "${HOME}/.config/mm" ]]          && echo "  - ~/.config/mmsso/ (config + token + venv)"
+[[ -d "${HOME}/.config/mmctl" ]]       && echo "  - ~/.config/mmssoctl/ (legacy config)"
 
 found=false
-for f in "${HOME}/bin/mm" "${HOME}/bin/refresh-token.py" "${HOME}/bin/mmctl"; do
+for f in "${HOME}/bin/mmsso" "${HOME}/bin/refresh-token.py" "${HOME}/bin/mmssoctl"; do
   [[ -f "$f" ]] && found=true
 done
 [[ -d "${HOME}/.config/mm" || -d "${HOME}/.config/mmctl" ]] && found=true
@@ -26,6 +26,6 @@ fi
 read -rp "Proceed? [y/N] " yn
 [[ "$yn" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
 
-rm -f "${HOME}/bin/mm" "${HOME}/bin/refresh-token.py" "${HOME}/bin/mmctl"
+rm -f "${HOME}/bin/mmsso" "${HOME}/bin/refresh-token.py" "${HOME}/bin/mmssoctl"
 rm -rf "${HOME}/.config/mm" "${HOME}/.config/mmctl"
 echo "Done."

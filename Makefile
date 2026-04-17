@@ -14,10 +14,10 @@ cookie-reader: cookie-reader.swift
 install: build
 	install -d $(BINDIR)
 	install -m 755 cookie-reader $(BINDIR)/cookie-reader
-	install -m 755 mm $(BINDIR)/mm
+	install -m 755 mmsso $(BINDIR)/mmsso
 
 uninstall:
-	rm -f $(BINDIR)/mm $(BINDIR)/cookie-reader
+	rm -f $(BINDIR)/mmsso $(BINDIR)/cookie-reader
 
 clean:
 	rm -f cookie-reader

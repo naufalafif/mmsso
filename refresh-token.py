@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Read the MMAUTHTOKEN cookie from Chrome's encrypted cookie store and write it
-to ~/.config/mm/token. Used internally by the `mm` wrapper.
+to ~/.config/mmsso/token. Used internally by the `mm` wrapper.
 
 Requires: pycookiecheat (pip install pycookiecheat)
 """
@@ -10,7 +10,7 @@ import argparse
 import os
 import sys
 
-TOKEN_FILE = os.path.expanduser("~/.config/mm/token")
+TOKEN_FILE = os.path.expanduser("~/.config/mmsso/token")
 
 
 def refresh(url: str):
