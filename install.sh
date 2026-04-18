@@ -46,11 +46,6 @@ cp "${SCRIPT_DIR}/mmsso" "${INSTALL_DIR}/mmsso"
 chmod +x "${INSTALL_DIR}/mmsso"
 echo "  ✓ ${INSTALL_DIR}/mmsso"
 
-# Install Python fallback
-cp "${SCRIPT_DIR}/refresh-token.py" "${INSTALL_DIR}/refresh-token.py"
-chmod +x "${INSTALL_DIR}/refresh-token.py"
-echo "  ✓ ${INSTALL_DIR}/refresh-token.py (Python fallback)"
-
 # Install mmctl (unless skipped or already present)
 if [[ "${SKIP_MMCTL:-}" == "1" ]]; then
   echo "  • Skipping mmctl install (SKIP_MMCTL=1)"

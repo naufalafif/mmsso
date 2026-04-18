@@ -24,14 +24,11 @@ set -euo pipefail
 CONFIG_DIR="${HOME}/.config/mmsso"
 CONFIG_FILE="${CONFIG_DIR}/config"
 TOKEN_FILE="${CONFIG_DIR}/token"
-VENV_DIR="${CONFIG_DIR}/.venv"
 MM_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REFRESH_SCRIPT="${MM_SCRIPT_DIR}/refresh-token.py"
 TOKEN_MAX_AGE_SECONDS=3600  # refresh if older than 1 hour
 
 # ── Cookie reader discovery ──────────────────────────────────────────────────
-# Prefer the compiled Swift binary (Keychain permission scopes to it, not the terminal).
-# Fall back to Python/pycookiecheat if the binary isn't available.
+# The compiled Swift binary — macOS Keychain permission scopes to it specifically.
 find_cookie_reader() {
   local bin_name="cookie-reader"
   if [[ -x "${MM_SCRIPT_DIR}/${bin_name}" ]]; then
@@ -128,35 +125,6 @@ token_age_human() {
   fi
 }
 
-ensure_venv() {
-  if [[ -f "${VENV_DIR}/bin/python3" ]] && "${VENV_DIR}/bin/python3" -c "import pycookiecheat" 2>/dev/null; then
-    return 0
-  fi
-
-  info "Setting up Python environment (one-time) ..."
-
-  # Try uv first (fast), fall back to python3 -m venv + pip
-  if command -v uv >/dev/null 2>&1; then
-    uv venv "$VENV_DIR" --quiet 2>/dev/null
-    uv pip install --python "${VENV_DIR}/bin/python3" pycookiecheat --quiet 2>/dev/null
-  elif command -v python3 >/dev/null 2>&1; then
-    python3 -m venv "$VENV_DIR" 2>/dev/null
-    "${VENV_DIR}/bin/pip" install --quiet pycookiecheat 2>/dev/null
-  else
-    fail "Python 3 is required but not found."
-    hint "Install it: brew install python3"
-    return 1
-  fi
-
-  if ! "${VENV_DIR}/bin/python3" -c "import pycookiecheat" 2>/dev/null; then
-    fail "Failed to install pycookiecheat."
-    hint "Try manually: ${VENV_DIR}/bin/pip install pycookiecheat"
-    return 1
-  fi
-
-  ok "Python environment ready."
-}
-
 # ── Token refresh ────────────────────────────────────────────────────────────
 
 show_no_session_error() {
@@ -203,21 +171,6 @@ refresh_via_binary() {
   ok "Token refreshed (${#token} chars) → ${TOKEN_FILE}"
 }
 
-refresh_via_python() {
-  ensure_venv || return 1
-
-  if [[ ! -f "$REFRESH_SCRIPT" ]]; then
-    fail "refresh-token.py not found at: $REFRESH_SCRIPT"
-    hint "Install the compiled binary instead: make install"
-    return 1
-  fi
-
-  local output
-  output=$("${VENV_DIR}/bin/python3" "$REFRESH_SCRIPT" --url "$MM_URL" 2>&1) || return 1
-
-  echo "$output" | grep -i "refreshed" | sed "s/^/$(printf "${GREEN}✓${RESET} ")/" || true
-}
-
 do_refresh() {
   local force="${1:-false}"
 
@@ -237,43 +190,29 @@ do_refresh() {
     fi
   fi
 
-  # Try the compiled Swift binary first (preferred — Keychain scoped to it)
-  if [[ -n "$COOKIE_READER" && -x "$COOKIE_READER" ]]; then
-    local err
-    err=$("$COOKIE_READER" "$(echo "$MM_URL" | sed -E 's|https?://||' | sed 's|/.*||')" "MMAUTHTOKEN" 2>&1 1>/dev/null) || true
-
-    if refresh_via_binary 2>/dev/null; then
-      return 0
-    fi
-
-    # Binary failed — check why
-    if echo "$err" | grep -qi "not found in Chrome\|cookie not found"; then
-      show_no_session_error
-    elif echo "$err" | grep -qi "Keychain\|denied\|not found in Keychain"; then
-      show_chrome_error
-    else
-      fail "Token refresh failed."
-      echo "$err" | grep -i "ERROR" | sed 's/^/  /' >&2
-    fi
+  if [[ -z "$COOKIE_READER" || ! -x "$COOKIE_READER" ]]; then
+    fail "cookie-reader binary not found."
+    hint "Reinstall: brew reinstall naufalafif/tap/mmsso"
     return 1
   fi
 
-  # Fall back to Python/pycookiecheat
-  if refresh_via_python; then
+  local domain
+  domain="$(echo "$MM_URL" | sed -E 's|https?://||' | sed 's|/.*||')"
+
+  local err
+  err=$("$COOKIE_READER" "$domain" "MMAUTHTOKEN" 2>&1 1>/dev/null) || true
+
+  if refresh_via_binary 2>/dev/null; then
     return 0
   fi
 
-  # Python also failed — show guidance
-  local py_err
-  py_err=$("${VENV_DIR}/bin/python3" "$REFRESH_SCRIPT" --url "$MM_URL" 2>&1) || true
-
-  if echo "$py_err" | grep -qi "MMAUTHTOKEN not found"; then
+  if echo "$err" | grep -qi "not found in Chrome\|cookie not found"; then
     show_no_session_error
-  elif echo "$py_err" | grep -qi "could not read"; then
+  elif echo "$err" | grep -qi "Keychain\|denied\|not found in Keychain"; then
     show_chrome_error
   else
     fail "Token refresh failed."
-    echo "$py_err" | grep -i "ERROR\|error\|failed\|denied" | sed 's/^/  /' >&2
+    echo "$err" | grep -i "ERROR" | sed 's/^/  /' >&2
   fi
   return 1
 }
@@ -304,45 +243,30 @@ cmd_setup() {
     return 1
   fi
 
-  # 2. Check cookie-reader (Swift binary preferred, Python fallback)
+  # 2. Check cookie-reader (compiled Swift binary)
   COOKIE_READER="$(find_cookie_reader)"
   if [[ -n "$COOKIE_READER" ]]; then
-    ok "Found cookie-reader at ${COOKIE_READER} (Keychain permission scoped to this binary)"
+    ok "Found cookie-reader at ${COOKIE_READER}"
+    hint "Keychain permission scoped to this binary"
   else
-    info "cookie-reader binary not found — checking Python fallback ..."
-    if command -v python3 >/dev/null 2>&1; then
-      ok "Found $(python3 --version 2>&1) (will use pycookiecheat)"
-      hint "For better Keychain security, install via: brew install naufalafif/tap/mmsso"
-    else
-      fail "Neither cookie-reader binary nor Python 3 found."
-      hint "Install via: brew install naufalafif/tap/mmsso"
-      return 1
-    fi
+    fail "cookie-reader binary not found."
+    hint "Install via: brew install naufalafif/tap/mmsso"
+    return 1
   fi
 
   # 3. Check Chrome
   info "Checking for Chrome ..."
   local chrome_cookie_db="${HOME}/Library/Application Support/Google/Chrome/Default/Cookies"
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    if [[ -f "$chrome_cookie_db" ]]; then
-      ok "Chrome cookie database found."
-    elif [[ -d "/Applications/Google Chrome.app" ]]; then
-      warn "Chrome is installed but no cookie database found."
-      hint "Open Chrome and browse to any site once, then re-run setup."
-      return 1
-    else
-      fail "Google Chrome is not installed."
-      hint "Download from https://www.google.com/chrome/"
-      return 1
-    fi
+  if [[ -f "$chrome_cookie_db" ]]; then
+    ok "Chrome cookie database found."
+  elif [[ -d "/Applications/Google Chrome.app" ]]; then
+    warn "Chrome is installed but no cookie database found."
+    hint "Open Chrome and browse to any site once, then re-run setup."
+    return 1
   else
-    # Linux: Chrome cookies are in ~/.config/google-chrome/Default/Cookies
-    local linux_cookie_db="${HOME}/.config/google-chrome/Default/Cookies"
-    if [[ -f "$linux_cookie_db" ]]; then
-      ok "Chrome cookie database found."
-    else
-      warn "Chrome cookie database not found. Make sure Chrome is installed and has been opened."
-    fi
+    fail "Google Chrome is not installed."
+    hint "Download from https://www.google.com/chrome/"
+    return 1
   fi
 
   # 4. Ask for server URL
@@ -372,10 +296,7 @@ cmd_setup() {
   save_config
   ok "Config saved to ${CONFIG_FILE}"
 
-  # 7. Set up Python venv
-  ensure_venv || return 1
-
-  # 8. Try token refresh
+  # 7. Try token refresh
   echo ""
   info "Attempting to read your Mattermost session from Chrome ..."
   hint "If macOS asks for Keychain access to \"Chrome Safe Storage\", click Always Allow."
@@ -398,7 +319,7 @@ cmd_setup() {
     info "Verifying connection ..."
     if "$mmctl_path" team list --suppress-warnings 2>/dev/null; then
       echo ""
-      ok "Setup complete! You can now use ${BOLD}mm${RESET} as a drop-in replacement for mmctl."
+      ok "Setup complete! You can now use ${BOLD}mmsso${RESET} as a drop-in replacement for mmctl."
       echo ""
       echo -e "  ${BOLD}Try it:${RESET}"
       echo -e "    mmsso team list --json"
@@ -463,12 +384,12 @@ cmd_status() {
     hint "Run: mmsso refresh"
   fi
 
-  # Python venv
-  if [[ -f "${VENV_DIR}/bin/python3" ]] && "${VENV_DIR}/bin/python3" -c "import pycookiecheat" 2>/dev/null; then
-    echo -e "  Auto-refresh: ${GREEN}ready${RESET} (pycookiecheat installed)"
+  # cookie-reader binary
+  if [[ -n "$COOKIE_READER" && -x "$COOKIE_READER" ]]; then
+    echo -e "  cookie-reader: ${GREEN}${COOKIE_READER}${RESET}"
   else
-    echo -e "  Auto-refresh: ${YELLOW}not set up${RESET}"
-    hint "Run: mmsso setup"
+    echo -e "  cookie-reader: ${RED}not found${RESET}"
+    hint "Reinstall: brew reinstall naufalafif/tap/mmsso"
   fi
 
   # Live auth test
@@ -515,18 +436,17 @@ cmd_help() {
   echo ""
   echo -e "${BOLD}HOW IT WORKS${RESET}"
   echo "  mmsso reads your Mattermost session token directly from Chrome's"
-  echo "  encrypted cookie store on disk (via pycookiecheat). As long as"
-  echo "  you have an active Mattermost session in Chrome, mmsso handles"
-  echo "  token refresh automatically — no passwords, no PATs."
+  echo "  encrypted cookie store on disk. As long as you have an active"
+  echo "  Mattermost session in Chrome, mmsso handles token refresh"
+  echo "  automatically — no passwords, no PATs."
   echo ""
   echo -e "${BOLD}WHEN IT BREAKS${RESET}"
   echo "  If you get auth errors, just open your Mattermost server in"
   echo "  Chrome, let SSO log you in, then run: mmsso refresh"
   echo ""
   echo -e "${BOLD}CONFIG${RESET}"
-  echo "  ~/.config/mmsso/config       Server URL + auth name"
-  echo "  ~/.config/mmsso/token        Session token (auto-managed)"
-  echo "  ~/.config/mmsso/.venv/       Python venv (auto-managed)"
+  echo "  ~/.config/mmsso/config   Server URL + auth name"
+  echo "  ~/.config/mmsso/token    Session token (auto-managed)"
   echo ""
 }
 

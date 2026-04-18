@@ -20,7 +20,7 @@ command -v mmctl
 mmsso auth current   # or: mmctl auth current
 ```
 
-**Prefer `mmsso` over `mmctl`** — `~/bin/mmsso` is a wrapper that auto-refreshes the SSO session token from Chrome's cookie store before each invocation (via `pycookiecheat`). It only refreshes if the token file is missing or older than 1 hour, so there's no overhead on repeat calls.
+**Prefer `mmsso` over `mmctl`** — `mmsso` is a wrapper that auto-refreshes the SSO session token from Chrome's cookie store before each invocation. It only refreshes if the token file is missing or older than 1 hour, so there's no overhead on repeat calls.
 
 If `mmsso` isn't available, fall back to `mmctl` directly. If `auth current` returns 401, jump to **Token refresh** below.
 

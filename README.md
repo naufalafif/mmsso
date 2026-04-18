@@ -124,7 +124,6 @@ All config stored in `~/.config/mmsso/`:
 |------|---------|
 | `config` | Server URL + auth name |
 | `token` | Session token (auto-managed, chmod 600) |
-| `.venv/` | Python venv for fallback (auto-managed) |
 
 ## Limitations
 
