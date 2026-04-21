@@ -60,8 +60,13 @@ mmsso user search <user-id-or-username> --json
 | `mmsso setup` | Interactive first-time setup |
 | `mmsso status` | Show auth status, token age, server info |
 | `mmsso refresh` | Force-refresh the token from Chrome |
+| `mmsso search <terms>` | Full-text search across channels you have access to |
+| `mmsso dms` | List your direct message channels |
+| `mmsso dm <username>` | Read messages from a DM channel |
 | `mmsso help` | Show help |
 | `mmsso <anything>` | Auto-refresh + passthrough to mmctl |
+
+`search`, `dms`, and `dm` hit the Mattermost REST API directly — mmctl doesn't expose those endpoints, but the session token authenticates them fine.
 
 ## How It Works
 
@@ -127,10 +132,7 @@ All config stored in `~/.config/mmsso/`:
 
 ## Limitations
 
-- **DMs** — `mmctl` has no command to read direct messages
-- **Full-text search** — not exposed by `mmctl`
-
-Both require a Personal Access Token + direct REST API access.
+- **Reactions, file downloads, pinned-post listings** — not exposed by `mmctl` or the extended commands. Possible to add later by hitting more REST API endpoints.
 
 ## Use with Claude Code
 

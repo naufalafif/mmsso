@@ -60,6 +60,46 @@ warn()  { echo -e "${YELLOW}!${RESET} $*" >&2; }
 fail()  { echo -e "${RED}✗${RESET} $*" >&2; }
 hint()  { echo -e "  ${DIM}$*${RESET}" >&2; }
 
+# ── REST API helpers ─────────────────────────────────────────────────────────
+# Used by mmsso search / dms / dm — mmctl doesn't expose these endpoints, but
+# the session token in ~/.config/mmsso/token authenticates fine against them.
+
+api_get() {
+  local path="$1"
+  local token
+  token="$(cat "$TOKEN_FILE" 2>/dev/null)" || return 1
+  [[ -z "$token" ]] && return 1
+  /usr/bin/curl -sf -H "Authorization: Bearer $token" "${MM_URL}${path}"
+}
+
+api_post_json() {
+  # Reads JSON body from stdin
+  local path="$1"
+  local token
+  token="$(cat "$TOKEN_FILE" 2>/dev/null)" || return 1
+  [[ -z "$token" ]] && return 1
+  /usr/bin/curl -sf -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -X POST --data-binary @- "${MM_URL}${path}"
+}
+
+resolve_team_id() {
+  # Picks the first team the user is a member of. Good enough for single-team users.
+  # If MM_AUTH_NAME matches a team, prefer that (future-proof for multi-team).
+  api_get /api/v4/users/me/teams | python3 -c "
+import json, sys, os
+teams = json.load(sys.stdin)
+if not teams:
+    sys.exit(1)
+pref = os.environ.get('MM_AUTH_NAME', '')
+for t in teams:
+    if t.get('name') == pref or t.get('display_name') == pref:
+        print(t['id'])
+        sys.exit(0)
+print(teams[0]['id'])
+" 2>/dev/null
+}
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 find_mmctl() {
@@ -416,6 +456,257 @@ cmd_refresh() {
   do_refresh true
 }
 
+# ── Extended commands (search, DMs) — use REST API directly ──────────────────
+# mmctl doesn't expose these, but our session token authenticates fine.
+
+_precheck() {
+  load_config
+  if [[ -z "${MM_URL:-}" ]]; then
+    fail "Not configured yet."
+    hint "Run: mmsso setup"
+    return 1
+  fi
+  do_refresh false >/dev/null 2>&1 || true
+  if [[ ! -s "$TOKEN_FILE" ]]; then
+    fail "No token. Run: mmsso refresh"
+    return 1
+  fi
+}
+
+cmd_search() {
+  if [[ $# -lt 1 || "$1" == "--help" || "$1" == "-h" ]]; then
+    echo "Usage: mmsso search <terms> [-n LIMIT] [--json]"
+    echo ""
+    echo "  Full-text search across channels you have access to."
+    echo "  Example: mmsso search \"ralph loop\" -n 10"
+    return
+  fi
+
+  local terms="$1"; shift
+  local json_out=false
+  local limit=20
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json_out=true; shift ;;
+      -n) limit="$2"; shift 2 ;;
+      *) warn "Unknown flag: $1"; shift ;;
+    esac
+  done
+
+  _precheck || return 1
+
+  local team_id
+  team_id="$(MM_AUTH_NAME="$MM_AUTH_NAME" resolve_team_id)"
+  if [[ -z "$team_id" ]]; then
+    fail "Could not resolve team ID."
+    return 1
+  fi
+
+  local payload
+  payload="$(TERMS="$terms" python3 -c 'import os, json; print(json.dumps({"terms": os.environ["TERMS"], "is_or_search": False}))')"
+
+  local response
+  response="$(printf '%s' "$payload" | api_post_json "/api/v4/teams/${team_id}/posts/search")" || {
+    fail "Search failed."
+    return 1
+  }
+
+  if $json_out; then
+    echo "$response"
+  else
+    echo "$response" | LIMIT="$limit" python3 -c '
+import json, sys, os
+from datetime import datetime
+d = json.load(sys.stdin)
+order = d.get("order", [])
+posts = d.get("posts", {})
+total = len(order)
+limit = int(os.environ.get("LIMIT", "20"))
+shown = min(total, limit)
+if total == 0:
+    print("No results.")
+    sys.exit(0)
+suffix = "es" if total != 1 else ""
+print("{} match{} (showing {}):".format(total, suffix, shown))
+print()
+for pid in order[:shown]:
+    p = posts[pid]
+    ts = datetime.fromtimestamp(p["create_at"]/1000).strftime("%Y-%m-%d %H:%M")
+    uid = p.get("user_id", "")[:8]
+    cid = p.get("channel_id", "")[:10]
+    msg = p.get("message", "").strip().split("\n")[0][:120]
+    print("[{}] user={} channel={}".format(ts, uid, cid))
+    print("  {}".format(msg))
+    print()
+'
+  fi
+}
+
+cmd_dms() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    echo "Usage: mmsso dms [--json]"
+    echo ""
+    echo "  List your direct message channels with counterpart usernames."
+    return
+  fi
+
+  local json_out=false
+  [[ "${1:-}" == "--json" ]] && json_out=true
+
+  _precheck || return 1
+
+  local team_id
+  team_id="$(MM_AUTH_NAME="$MM_AUTH_NAME" resolve_team_id)" || { fail "No team."; return 1; }
+
+  local channels
+  channels="$(api_get "/api/v4/users/me/teams/${team_id}/channels")" || {
+    fail "Failed to list channels."
+    return 1
+  }
+
+  local me_id
+  me_id="$(api_get /api/v4/users/me | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])')"
+
+  # Extract DM channels (type=D) with the other participant's user_id
+  local dm_list
+  dm_list="$(echo "$channels" | ME="$me_id" python3 -c '
+import json, sys, os
+me = os.environ["ME"]
+data = json.load(sys.stdin)
+dms = []
+for c in data:
+    if c.get("type") != "D":
+        continue
+    parts = c["name"].split("__")
+    other = parts[0] if parts[0] != me else (parts[1] if len(parts) > 1 else me)
+    dms.append({"id": c["id"], "other_id": other, "last": c.get("last_post_at", 0)})
+dms.sort(key=lambda x: x["last"], reverse=True)
+for dm in dms:
+    print("{}\t{}\t{}".format(dm["id"], dm["other_id"], dm["last"]))
+')"
+
+  if [[ -z "$dm_list" ]]; then
+    echo "No DMs."
+    return
+  fi
+
+  if $json_out; then
+    # Resolve other_ids to usernames for richer JSON
+    local resolved="["
+    local first=true
+    while IFS=$'\t' read -r ch_id other_id last; do
+      local uname
+      uname="$(api_get "/api/v4/users/${other_id}" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("username",""))' 2>/dev/null)"
+      $first || resolved="${resolved},"
+      first=false
+      resolved="${resolved}{\"channel_id\":\"${ch_id}\",\"username\":\"${uname}\",\"user_id\":\"${other_id}\",\"last_post_at\":${last:-0}}"
+    done <<< "$dm_list"
+    resolved="${resolved}]"
+    echo "$resolved" | python3 -m json.tool
+  else
+    printf "%-28s %-30s %s\n" "CHANNEL_ID" "USERNAME" "LAST_POST"
+    while IFS=$'\t' read -r ch_id other_id last; do
+      local uname
+      uname="$(api_get "/api/v4/users/${other_id}" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("username","?"))' 2>/dev/null || echo "?")"
+      local last_str="-"
+      if [[ "$last" != "0" && -n "$last" ]]; then
+        last_str="$(python3 -c "from datetime import datetime; print(datetime.fromtimestamp($last/1000).strftime('%Y-%m-%d %H:%M'))")"
+      fi
+      printf "%-28s %-30s %s\n" "$ch_id" "@$uname" "$last_str"
+    done <<< "$dm_list"
+  fi
+}
+
+cmd_dm() {
+  if [[ $# -lt 1 || "$1" == "--help" || "$1" == "-h" ]]; then
+    echo "Usage: mmsso dm <username> [-n LIMIT] [--json] [--show-ids]"
+    echo ""
+    echo "  Read messages from a direct message channel."
+    echo "  Example: mmsso dm john.doe -n 50"
+    return
+  fi
+
+  local username="$1"; shift
+  local json_out=false
+  local limit=30
+  local show_ids=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json_out=true; shift ;;
+      --show-ids) show_ids=true; shift ;;
+      -n) limit="$2"; shift 2 ;;
+      *) warn "Unknown flag: $1"; shift ;;
+    esac
+  done
+
+  _precheck || return 1
+
+  # Resolve usernames → user_ids
+  local me_id target_id
+  me_id="$(api_get /api/v4/users/me | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')" || {
+    fail "Failed to resolve your user ID."
+    return 1
+  }
+
+  target_id="$(api_get "/api/v4/users/username/${username}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' 2>/dev/null)" || true
+  if [[ -z "$target_id" ]]; then
+    fail "User not found: ${username}"
+    return 1
+  fi
+
+  # Get-or-create DM channel
+  local dm_channel
+  dm_channel="$(printf '["%s","%s"]' "$me_id" "$target_id" | api_post_json /api/v4/channels/direct)" || {
+    fail "Failed to open DM channel with @${username}."
+    return 1
+  }
+
+  local dm_id
+  dm_id="$(echo "$dm_channel" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+
+  # Fetch posts
+  local posts
+  posts="$(api_get "/api/v4/channels/${dm_id}/posts?per_page=${limit}")" || {
+    fail "Failed to read DM messages."
+    return 1
+  }
+
+  if $json_out; then
+    echo "$posts"
+  else
+    ME="$me_id" OTHER_NAME="$username" SHOW_IDS="$show_ids" echo "$posts" | \
+      ME="$me_id" OTHER_NAME="$username" SHOW_IDS="$show_ids" python3 -c '
+import json, sys, os
+from datetime import datetime
+d = json.load(sys.stdin)
+order = d.get("order", [])
+posts = d.get("posts", {})
+me = os.environ["ME"]
+other = os.environ["OTHER_NAME"]
+show_ids = os.environ.get("SHOW_IDS", "false") == "true"
+if not order:
+    print("(no messages)")
+    sys.exit(0)
+# Posts come newest-first; flip for chronological display
+for pid in reversed(order):
+    p = posts[pid]
+    ts = datetime.fromtimestamp(p["create_at"]/1000).strftime("%Y-%m-%d %H:%M")
+    who = "me" if p["user_id"] == me else other
+    msg = p.get("message", "").strip()
+    id_str = f" [{pid}]" if show_ids else ""
+    if not msg:
+        msg = "(no text)"
+    # Multi-line messages: indent continuation
+    lines = msg.split("\n")
+    print(f"[{ts}] @{who}{id_str}: {lines[0]}")
+    for line in lines[1:]:
+        print(f"                {line}")
+'
+  fi
+}
+
 cmd_help() {
   echo ""
   echo -e "${BOLD}mmsso${RESET} — Mattermost CLI with auto-refreshing SSO tokens"
@@ -424,6 +715,9 @@ cmd_help() {
   echo "  mmsso setup                  First-time setup (interactive)"
   echo "  mmsso status                 Show auth status, token age, server info"
   echo "  mmsso refresh                Force-refresh the token from Chrome"
+  echo "  mmsso search <terms>         Full-text search across channels you have access to"
+  echo "  mmsso dms                    List your direct message channels"
+  echo "  mmsso dm <username>          Read messages from a DM channel"
   echo "  mmsso help                   Show this help"
   echo "  mmsso <any mmctl command>    Auto-refresh + passthrough to mmctl"
   echo ""
@@ -432,7 +726,8 @@ cmd_help() {
   echo "  mmsso post list myteam:general --json --show-ids -n 100"
   echo "  mmsso channel list myteam --json"
   echo "  mmsso user search john.doe --json"
-  echo "  mmsso post list <channel-id> --json --since 2026-04-10T00:00:00Z"
+  echo "  mmsso search \"deploy failed\" -n 10"
+  echo "  mmsso dm ai-agent -n 20"
   echo ""
   echo -e "${BOLD}HOW IT WORKS${RESET}"
   echo "  mmsso reads your Mattermost session token directly from Chrome's"
@@ -462,6 +757,18 @@ main() {
       ;;
     refresh)
       cmd_refresh
+      ;;
+    search)
+      shift
+      cmd_search "$@"
+      ;;
+    dms)
+      shift
+      cmd_dms "$@"
+      ;;
+    dm)
+      shift
+      cmd_dm "$@"
       ;;
     help|--help|-h|"")
       cmd_help

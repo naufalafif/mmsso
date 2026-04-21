@@ -104,16 +104,39 @@ Note: version sub-command takes no dashes — `mmctl version` works, `mmctl --ve
 - Add `--suppress-warnings` if version-mismatch warnings interfere with JSON parsing.
 - For multi-step reads, chain with `&&` in a single bash call to minimize config re-reads.
 
+## Extended commands (mmsso only — REST API wrappers)
+
+mmsso exposes three commands that mmctl doesn't have, by hitting the REST API directly with the session token:
+
+### Full-text search
+```bash
+mmsso search "deploy failed" -n 20        # human-readable
+mmsso search "deploy failed" -n 20 --json # raw API response
+```
+Returns matching posts with `create_at` timestamp, `user_id`, `channel_id`. Follow up with `mmsso user search <id>` and `mmsso channel list` to resolve context.
+
+### List DMs
+```bash
+mmsso dms             # table: channel_id, username, last_post
+mmsso dms --json
+```
+
+### Read a DM
+```bash
+mmsso dm <username> -n 30              # human-readable
+mmsso dm <username> -n 30 --json
+mmsso dm <username> --show-ids         # include post IDs
+```
+Resolves username → user_id → get-or-create DM channel → fetch posts. Output is oldest-first for readability.
+
 ## Hard limitations
 
-- ❌ **DMs / group messages** — no command lists or reads direct messages. Would need Personal Access Token + REST API.
-- ❌ **Full-text message search** — not exposed by mmctl. Same: needs PAT + REST API `/api/v4/posts/search`.
-- ❌ **Reactions, file downloads, pinned-post listing**.
+- ❌ **Reactions, file downloads, pinned-post listings** — not wrapped. Possible to add by hitting more REST endpoints.
 - ✅ Channel posts (including reply threads via `root_id` grouping).
 - ✅ User/team/channel/bot/webhook management.
 - ✅ Posting (with user confirmation).
-
-If the user specifically needs DMs or message search, say so upfront and note that a Personal Access Token (per-user enablement in System Console) unlocks them via the REST API — a narrower IT ask than "enable PATs for everyone."
+- ✅ Full-text search (via `mmsso search`).
+- ✅ DMs (via `mmsso dms` and `mmsso dm <username>`).
 
 ## Behavioral notes for Claude
 
