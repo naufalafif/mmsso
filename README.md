@@ -38,10 +38,27 @@ This interactively configures your server URL, compiles the cookie reader (if ne
 
 ## Prerequisites
 
-- **macOS**
-- **Google Chrome** with an active Mattermost login (SSO)
-- **mmctl** — `brew install mmctl` or [download from Mattermost](https://releases.mattermost.com/mmctl/)
-- **Swift 5.9+** for building `cookie-reader` from source (included with Xcode Command Line Tools)
+**macOS (auto-refresh mode)** — this is the primary use case:
+- Google Chrome with an active Mattermost login (SSO)
+- `mmctl` — `brew install mmctl` or [download from Mattermost](https://releases.mattermost.com/mmctl/)
+- Swift 5.9+ for building `cookie-reader` from source (included with Xcode Command Line Tools)
+
+**Linux (static-token mode)** — for servers / headless use (e.g. LLM agents):
+- A Personal Access Token (PAT) or bot token for your Mattermost account
+- `mmctl` — [download from Mattermost](https://releases.mattermost.com/mmctl/)
+- No Chrome, no Swift, no auto-refresh (static PAT doesn't expire)
+
+## Install (Linux / server)
+
+```bash
+git clone https://github.com/naufalafif/mmsso.git
+cd mmsso
+./install.sh         # installs mmsso + prompts to install mmctl
+
+mmsso setup          # prompts for server URL + pastes your PAT
+```
+
+`mmsso setup` detects the lack of cookie-reader on Linux and switches to static-token mode automatically — you paste a PAT and it's written to `~/.config/mmsso/token`.
 
 ## Usage
 

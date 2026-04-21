@@ -221,6 +221,17 @@ do_refresh() {
     return 1
   fi
 
+  # Static-token mode: no cookie-reader (e.g. Linux server with PAT) —
+  # the token is assumed to be long-lived and refresh is a no-op.
+  if [[ -z "$COOKIE_READER" || ! -x "$COOKIE_READER" ]]; then
+    if [[ -s "$TOKEN_FILE" ]]; then
+      return 0
+    fi
+    fail "No token and no cookie-reader."
+    hint "Run: mmsso setup"
+    return 1
+  fi
+
   # Skip if token is fresh (unless forced)
   if [[ "$force" != "true" && -s "$TOKEN_FILE" ]]; then
     local age
@@ -228,12 +239,6 @@ do_refresh() {
     if (( age < TOKEN_MAX_AGE_SECONDS )); then
       return 0
     fi
-  fi
-
-  if [[ -z "$COOKIE_READER" || ! -x "$COOKIE_READER" ]]; then
-    fail "cookie-reader binary not found."
-    hint "Reinstall: brew reinstall naufalafif/tap/mmsso"
-    return 1
   fi
 
   local domain
@@ -283,30 +288,31 @@ cmd_setup() {
     return 1
   fi
 
-  # 2. Check cookie-reader (compiled Swift binary)
+  # 2. Check cookie-reader (optional — desktop-only, not expected on Linux)
   COOKIE_READER="$(find_cookie_reader)"
   if [[ -n "$COOKIE_READER" ]]; then
     ok "Found cookie-reader at ${COOKIE_READER}"
     hint "Keychain permission scoped to this binary"
   else
-    fail "cookie-reader binary not found."
-    hint "Install via: brew install naufalafif/tap/mmsso"
-    return 1
+    info "cookie-reader not installed — will use static-token mode"
+    hint "macOS users can install auto-refresh via: brew install naufalafif/tap/mmsso"
   fi
 
-  # 3. Check Chrome
-  info "Checking for Chrome ..."
-  local chrome_cookie_db="${HOME}/Library/Application Support/Google/Chrome/Default/Cookies"
-  if [[ -f "$chrome_cookie_db" ]]; then
-    ok "Chrome cookie database found."
-  elif [[ -d "/Applications/Google Chrome.app" ]]; then
-    warn "Chrome is installed but no cookie database found."
-    hint "Open Chrome and browse to any site once, then re-run setup."
-    return 1
-  else
-    fail "Google Chrome is not installed."
-    hint "Download from https://www.google.com/chrome/"
-    return 1
+  # 3. Check Chrome (only if using cookie-reader auto-refresh mode)
+  if [[ -n "$COOKIE_READER" && "$(uname -s)" == "Darwin" ]]; then
+    info "Checking for Chrome ..."
+    local chrome_cookie_db="${HOME}/Library/Application Support/Google/Chrome/Default/Cookies"
+    if [[ -f "$chrome_cookie_db" ]]; then
+      ok "Chrome cookie database found."
+    elif [[ -d "/Applications/Google Chrome.app" ]]; then
+      warn "Chrome is installed but no cookie database found."
+      hint "Open Chrome and browse to any site once, then re-run setup."
+      return 1
+    else
+      fail "Google Chrome is not installed."
+      hint "Download from https://www.google.com/chrome/ (or skip cookie-reader and use a PAT)"
+      return 1
+    fi
   fi
 
   # 4. Ask for server URL
@@ -336,44 +342,68 @@ cmd_setup() {
   save_config
   ok "Config saved to ${CONFIG_FILE}"
 
-  # 7. Try token refresh
+  # 7. Obtain token — cookie-reader (macOS desktop) OR paste a PAT (server/Linux)
   echo ""
-  info "Attempting to read your Mattermost session from Chrome ..."
-  hint "If macOS asks for Keychain access to \"Chrome Safe Storage\", click Always Allow."
-  echo ""
-
-  if do_refresh true; then
-    # 9. Set up mmctl auth
-    info "Configuring mmctl auth ..."
-    if "$mmctl_path" auth login "$MM_URL" \
-        --name "$MM_AUTH_NAME" \
-        --access-token-file "$TOKEN_FILE" 2>/dev/null; then
-      ok "mmctl auth configured as \"${MM_AUTH_NAME}\""
-    else
-      warn "mmctl auth login had an issue — you may need to run it manually:"
-      hint "$mmctl_path auth login $MM_URL --name $MM_AUTH_NAME --access-token-file $TOKEN_FILE"
-    fi
-
-    # 10. Verify
+  if [[ -n "$COOKIE_READER" && -x "$COOKIE_READER" ]]; then
+    info "Reading Mattermost session from Chrome ..."
+    hint "If macOS asks for Keychain access to \"Chrome Safe Storage\", click Always Allow."
     echo ""
-    info "Verifying connection ..."
-    if "$mmctl_path" team list --suppress-warnings 2>/dev/null; then
+    do_refresh true || {
       echo ""
-      ok "Setup complete! You can now use ${BOLD}mmsso${RESET} as a drop-in replacement for mmctl."
-      echo ""
-      echo -e "  ${BOLD}Try it:${RESET}"
-      echo -e "    mmsso team list --json"
-      echo -e "    mmsso channel list <team> --json"
-      echo -e "    mmsso post list <channel-id> --json --show-ids -n 50"
-      echo ""
-    else
-      warn "Connection test failed — token might be expired."
-      hint "Open ${MM_URL} in Chrome, log in, and run: mmsso refresh"
-    fi
+      warn "Could not read token from Chrome. Make sure you're logged into Mattermost in Chrome."
+      hint "After logging in, run: mmsso refresh"
+      return 1
+    }
   else
+    info "Static-token mode (no cookie-reader — Linux server or Chrome not available)"
     echo ""
-    warn "Could not read token from Chrome. Make sure you're logged into Mattermost in Chrome."
-    hint "After logging in, run: mmsso refresh"
+    echo -e "  Paste a Personal Access Token or bot token:"
+    read -rsp "$(echo -e "${BLUE}▸${RESET}") Token: " pat_input
+    echo ""
+    pat_input="$(echo "$pat_input" | tr -d '[:space:]')"
+    if [[ -z "$pat_input" ]]; then
+      fail "Token is required."
+      return 1
+    fi
+    mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR"
+    local fd
+    exec {fd}>"$TOKEN_FILE"
+    printf '%s' "$pat_input" >&${fd}
+    exec {fd}>&-
+    chmod 600 "$TOKEN_FILE"
+    ok "Token saved (${#pat_input} chars) → ${TOKEN_FILE}"
+  fi
+
+  # 8. Set up mmctl auth
+  info "Configuring mmctl auth ..."
+  if "$mmctl_path" auth login "$MM_URL" \
+      --name "$MM_AUTH_NAME" \
+      --access-token-file "$TOKEN_FILE" 2>/dev/null; then
+    ok "mmctl auth configured as \"${MM_AUTH_NAME}\""
+  else
+    warn "mmctl auth login had an issue — you may need to run it manually:"
+    hint "$mmctl_path auth login $MM_URL --name $MM_AUTH_NAME --access-token-file $TOKEN_FILE"
+  fi
+
+  # 9. Verify
+  echo ""
+  info "Verifying connection ..."
+  if "$mmctl_path" team list --suppress-warnings 2>/dev/null; then
+    echo ""
+    ok "Setup complete! You can now use ${BOLD}mmsso${RESET} as a drop-in replacement for mmctl."
+    echo ""
+    echo -e "  ${BOLD}Try it:${RESET}"
+    echo -e "    mmsso team list --json"
+    echo -e "    mmsso search \"deploy failed\" -n 10"
+    echo -e "    mmsso dms"
+    echo ""
+  else
+    warn "Connection test failed — token might be expired or invalid."
+    if [[ -n "$COOKIE_READER" && -x "$COOKIE_READER" ]]; then
+      hint "Open ${MM_URL} in Chrome, log in, and run: mmsso refresh"
+    else
+      hint "Check the PAT and re-run: mmsso setup"
+    fi
   fi
 }
 
@@ -424,12 +454,13 @@ cmd_status() {
     hint "Run: mmsso refresh"
   fi
 
-  # cookie-reader binary
+  # Cookie reader (auto-refresh) — optional on Linux/server setups using a PAT
   if [[ -n "$COOKIE_READER" && -x "$COOKIE_READER" ]]; then
     echo -e "  cookie-reader: ${GREEN}${COOKIE_READER}${RESET}"
+    echo -e "  Mode:       ${GREEN}auto-refresh${RESET} (reads Chrome cookie)"
   else
-    echo -e "  cookie-reader: ${RED}not found${RESET}"
-    hint "Reinstall: brew reinstall naufalafif/tap/mmsso"
+    echo -e "  cookie-reader: ${DIM}not installed${RESET}"
+    echo -e "  Mode:       ${GREEN}static token${RESET} (e.g. Personal Access Token)"
   fi
 
   # Live auth test
@@ -451,6 +482,11 @@ cmd_refresh() {
     fail "Not configured yet."
     hint "Run: mmsso setup"
     return 1
+  fi
+  if [[ -z "$COOKIE_READER" || ! -x "$COOKIE_READER" ]]; then
+    warn "Static-token mode — no Chrome cookie to refresh."
+    hint "If your token is expired, update it with: mmsso setup"
+    return 0
   fi
   info "Refreshing token from Chrome ..."
   do_refresh true
