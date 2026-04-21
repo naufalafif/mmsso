@@ -110,10 +110,17 @@ mmsso exposes three commands that mmctl doesn't have, by hitting the REST API di
 
 ### Full-text search
 ```bash
-mmsso search "deploy failed" -n 20        # human-readable
+mmsso search "deploy failed" -n 20        # human-readable — usernames & channel names resolved
 mmsso search "deploy failed" -n 20 --json # raw API response
 ```
-Returns matching posts with `create_at` timestamp, `user_id`, `channel_id`. Follow up with `mmsso user search <id>` and `mmsso channel list` to resolve context.
+Output is human-friendly by default: `@username in ~channel` with `post_id` shown for follow-ups. Marks `[thread]` if the post has replies and `(reply)` if it's inside a thread.
+
+### Fetch a thread
+```bash
+mmsso thread <post-id>            # full conversation, chronological
+mmsso thread <post-id> --json     # raw
+```
+Given ANY post ID in a thread (root OR a reply), returns the entire thread with all participants resolved to usernames. Use this after `search` finds a thread hit to get full context — much easier than reconstructing from `root_id` manually.
 
 ### List DMs
 ```bash

@@ -515,30 +515,156 @@ cmd_search() {
   if $json_out; then
     echo "$response"
   else
-    echo "$response" | LIMIT="$limit" python3 -c '
-import json, sys, os
+    echo "$response" | LIMIT="$limit" TOKEN_FILE="$TOKEN_FILE" MM_URL="$MM_URL" python3 -c '
+import json, sys, os, urllib.request
 from datetime import datetime
+
+token = open(os.environ["TOKEN_FILE"]).read().strip()
+base = os.environ["MM_URL"]
+
+def api_get(path):
+    req = urllib.request.Request(base + path, headers={
+        "Authorization": "Bearer " + token,
+        "User-Agent": "mmsso/1.0"
+    })
+    return json.loads(urllib.request.urlopen(req, timeout=10).read())
+
+def api_post(path, body):
+    req = urllib.request.Request(
+        base + path,
+        data=json.dumps(body).encode(),
+        headers={
+            "Authorization": "Bearer " + token,
+            "Content-Type": "application/json",
+            "User-Agent": "mmsso/1.0"
+        }
+    )
+    return json.loads(urllib.request.urlopen(req, timeout=10).read())
+
 d = json.load(sys.stdin)
 order = d.get("order", [])
 posts = d.get("posts", {})
 total = len(order)
 limit = int(os.environ.get("LIMIT", "20"))
-shown = min(total, limit)
+shown_ids = order[:limit]
+
 if total == 0:
     print("No results.")
     sys.exit(0)
+
+# Resolve user_ids (batch) and channel_ids (individual)
+user_ids = sorted({posts[pid]["user_id"] for pid in shown_ids if posts[pid].get("user_id")})
+channel_ids = sorted({posts[pid]["channel_id"] for pid in shown_ids if posts[pid].get("channel_id")})
+
+users = {}
+if user_ids:
+    try:
+        for u in api_post("/api/v4/users/ids", user_ids):
+            users[u["id"]] = u.get("username", u["id"][:8])
+    except Exception:
+        pass
+
+channels = {}
+for cid in channel_ids:
+    try:
+        c = api_get("/api/v4/channels/" + cid)
+        channels[cid] = c.get("display_name") or c.get("name") or cid[:10]
+    except Exception:
+        channels[cid] = cid[:10]
+
 suffix = "es" if total != 1 else ""
-print("{} match{} (showing {}):".format(total, suffix, shown))
+print("{} match{} (showing {}):".format(total, suffix, len(shown_ids)))
 print()
-for pid in order[:shown]:
+for pid in shown_ids:
     p = posts[pid]
     ts = datetime.fromtimestamp(p["create_at"]/1000).strftime("%Y-%m-%d %H:%M")
-    uid = p.get("user_id", "")[:8]
-    cid = p.get("channel_id", "")[:10]
-    msg = p.get("message", "").strip().split("\n")[0][:120]
-    print("[{}] user={} channel={}".format(ts, uid, cid))
+    uname = users.get(p.get("user_id", ""), (p.get("user_id") or "")[:8])
+    cname = channels.get(p.get("channel_id", ""), (p.get("channel_id") or "")[:10])
+    msg = p.get("message", "").strip().split("\n")[0][:140]
+    thread_marker = " [thread]" if p.get("reply_count", 0) > 0 else ""
+    root_marker = " (reply)" if p.get("root_id") else ""
+    print("[{}] @{} in ~{}{}{}".format(ts, uname, cname, thread_marker, root_marker))
+    print("  post_id={} channel_id={}".format(pid, p.get("channel_id", "")))
     print("  {}".format(msg))
     print()
+'
+  fi
+}
+
+cmd_thread() {
+  if [[ $# -lt 1 || "$1" == "--help" || "$1" == "-h" ]]; then
+    echo "Usage: mmsso thread <post-id> [--json]"
+    echo ""
+    echo "  Fetch the full thread containing a given post."
+    echo "  Example: mmsso thread okwomhfam7bfjr1ffwd9yjgfow"
+    return
+  fi
+
+  local post_id="$1"; shift
+  local json_out=false
+  [[ "${1:-}" == "--json" ]] && json_out=true
+
+  _precheck || return 1
+
+  local response
+  response="$(api_get "/api/v4/posts/${post_id}/thread")" || {
+    fail "Failed to fetch thread (post may not exist or you lack access)."
+    return 1
+  }
+
+  if $json_out; then
+    echo "$response"
+  else
+    echo "$response" | TOKEN_FILE="$TOKEN_FILE" MM_URL="$MM_URL" python3 -c '
+import json, sys, os, urllib.request
+from datetime import datetime
+
+token = open(os.environ["TOKEN_FILE"]).read().strip()
+base = os.environ["MM_URL"]
+
+def api_post(path, body):
+    req = urllib.request.Request(
+        base + path,
+        data=json.dumps(body).encode(),
+        headers={
+            "Authorization": "Bearer " + token,
+            "Content-Type": "application/json",
+            "User-Agent": "mmsso/1.0"
+        }
+    )
+    return json.loads(urllib.request.urlopen(req, timeout=10).read())
+
+d = json.load(sys.stdin)
+order = d.get("order", [])
+posts = d.get("posts", {})
+if not order:
+    print("(empty thread)")
+    sys.exit(0)
+
+# Resolve usernames
+user_ids = sorted({posts[pid]["user_id"] for pid in order if posts[pid].get("user_id")})
+users = {}
+if user_ids:
+    try:
+        for u in api_post("/api/v4/users/ids", user_ids):
+            users[u["id"]] = u.get("username", u["id"][:8])
+    except Exception:
+        pass
+
+# Order is chronological from API; print oldest first
+sorted_ids = sorted(order, key=lambda p: posts[p]["create_at"])
+for idx, pid in enumerate(sorted_ids):
+    p = posts[pid]
+    ts = datetime.fromtimestamp(p["create_at"]/1000).strftime("%Y-%m-%d %H:%M")
+    uname = users.get(p.get("user_id", ""), (p.get("user_id") or "")[:8])
+    prefix = "ROOT" if not p.get("root_id") else "  └─"
+    msg = p.get("message", "").strip() or "(no text)"
+    lines = msg.split("\n")
+    print("{} [{}] @{}: {}".format(prefix, ts, uname, lines[0]))
+    for line in lines[1:]:
+        print("              {}".format(line))
+    if idx == 0 and len(sorted_ids) > 1:
+        print()
 '
   fi
 }
@@ -716,6 +842,7 @@ cmd_help() {
   echo "  mmsso status                 Show auth status, token age, server info"
   echo "  mmsso refresh                Force-refresh the token from Chrome"
   echo "  mmsso search <terms>         Full-text search across channels you have access to"
+  echo "  mmsso thread <post-id>       Fetch the full thread containing a given post"
   echo "  mmsso dms                    List your direct message channels"
   echo "  mmsso dm <username>          Read messages from a DM channel"
   echo "  mmsso help                   Show this help"
@@ -761,6 +888,10 @@ main() {
     search)
       shift
       cmd_search "$@"
+      ;;
+    thread)
+      shift
+      cmd_thread "$@"
       ;;
     dms)
       shift
