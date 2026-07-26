@@ -100,6 +100,37 @@ print(teams[0]['id'])
 " 2>/dev/null
 }
 
+api_upload_file() {
+  # Uploads one file to a channel, returns the file_id on stdout.
+  local channel_id="$1"
+  local file_path="$2"
+  local token
+  token="$(cat "$TOKEN_FILE" 2>/dev/null)" || return 1
+  [[ -z "$token" ]] && return 1
+  [[ -f "$file_path" ]] || { fail "File not found: $file_path"; return 1; }
+  local response
+  response="$(/usr/bin/curl -sf -H "Authorization: Bearer $token" \
+    -F "channel_id=${channel_id}" \
+    -F "files=@${file_path}" \
+    "${MM_URL}/api/v4/files")" || return 1
+  echo "$response" | python3 -c 'import json, sys; d = json.load(sys.stdin); print((d.get("file_infos") or [{}])[0].get("id", ""))' 2>/dev/null
+}
+
+resolve_channel_id() {
+  # "team:channel" -> channel_id. Same syntax mmctl's own commands accept.
+  local team_channel="$1"
+  local team_name="${team_channel%%:*}"
+  local channel_name="${team_channel#*:}"
+  if [[ "$team_name" == "$channel_name" ]]; then
+    fail "Expected <team>:<channel>, got '${team_channel}'"
+    return 1
+  fi
+  local team_id
+  team_id="$(api_get "/api/v4/teams/name/${team_name}" 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin).get("id", ""))' 2>/dev/null)"
+  [[ -z "$team_id" ]] && { fail "Team '${team_name}' not found (or your token lacks access)."; return 1; }
+  api_get "/api/v4/teams/${team_id}/channels/name/${channel_name}" 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin).get("id", ""))' 2>/dev/null
+}
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 find_mmctl() {
@@ -705,6 +736,64 @@ for idx, pid in enumerate(sorted_ids):
   fi
 }
 
+cmd_post_create() {
+  # Intercept `mmsso post create` ONLY when --file is present — mmctl's own
+  # `post create` has no attachment support at all. Plain-text posts still
+  # fall through to mmctl passthrough (see the dispatch below).
+  #
+  # Usage: mmsso post create <team:channel> --message "text" \
+  #          --file /path/to/file [--file /path/to/file2 ...] \
+  #          [--reply-to <post-id>]
+  if [[ $# -lt 1 || "$1" == "--help" || "$1" == "-h" ]]; then
+    echo "Usage: mmsso post create <team:channel> --message \"text\" --file <path> [--file <path> ...] [--reply-to <post-id>]"
+    return 0
+  fi
+
+  local team_channel="$1"; shift
+  local message="" reply_to=""
+  local -a files=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --message|-m) message="$2"; shift 2 ;;
+      --file) files+=("$2"); shift 2 ;;
+      --reply-to|-r) reply_to="$2"; shift 2 ;;
+      *) fail "Unknown flag: $1"; return 1 ;;
+    esac
+  done
+
+  _precheck || return 1
+
+  local channel_id
+  channel_id="$(resolve_channel_id "$team_channel")" || return 1
+  [[ -z "$channel_id" ]] && { fail "Channel '${team_channel}' not found (or your token lacks access)."; return 1; }
+
+  local -a file_ids=()
+  local f fid
+  for f in "${files[@]}"; do
+    fid="$(api_upload_file "$channel_id" "$f")" || { fail "Upload failed: $f"; return 1; }
+    [[ -z "$fid" ]] && { fail "Upload returned no file_id: $f"; return 1; }
+    file_ids+=("$fid")
+    info "Uploaded ${f} -> ${fid}"
+  done
+
+  local payload
+  payload="$(CHANNEL_ID="$channel_id" MESSAGE="$message" ROOT_ID="$reply_to" FILE_IDS="${file_ids[*]:-}" python3 -c '
+import json, os
+body = {"channel_id": os.environ["CHANNEL_ID"], "message": os.environ["MESSAGE"]}
+root_id = os.environ.get("ROOT_ID", "")
+if root_id:
+    body["root_id"] = root_id
+file_ids = os.environ.get("FILE_IDS", "").split()
+if file_ids:
+    body["file_ids"] = file_ids
+print(json.dumps(body))
+')"
+
+  local response
+  response="$(printf '%s' "$payload" | api_post_json /api/v4/posts)" || { fail "Post create failed."; return 1; }
+  echo "$response" | python3 -c 'import json, sys; print("id=" + json.load(sys.stdin).get("id", ""))'
+}
+
 cmd_dms() {
   if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo "Usage: mmsso dms [--json]"
@@ -879,6 +968,10 @@ cmd_help() {
   echo "  mmsso refresh                Force-refresh the token from Chrome"
   echo "  mmsso search <terms>         Full-text search across channels you have access to"
   echo "  mmsso thread <post-id>       Fetch the full thread containing a given post"
+  echo "  mmsso post create <team:channel> --message \"...\" --file <path>"
+  echo "                               Post a message with one or more file attachments"
+  echo "                               (mmctl's own post create has no attachment support at all;"
+  echo "                               plain-text post create still passes through to mmctl)"
   echo "  mmsso dms                    List your direct message channels"
   echo "  mmsso dm <username>          Read messages from a DM channel"
   echo "  mmsso help                   Show this help"
@@ -887,6 +980,7 @@ cmd_help() {
   echo -e "${BOLD}EXAMPLES${RESET}"
   echo "  mmsso team list --json"
   echo "  mmsso post list myteam:general --json --show-ids -n 100"
+  echo "  mmsso post create myteam:general --message \"see attached\" --file ./recording.webm"
   echo "  mmsso channel list myteam --json"
   echo "  mmsso user search john.doe --json"
   echo "  mmsso search \"deploy failed\" -n 10"
@@ -928,6 +1022,29 @@ main() {
     thread)
       shift
       cmd_thread "$@"
+      ;;
+    post)
+      # Intercept `post create` ONLY when --file is present — mmctl's own
+      # `post create` has no attachment support at all. Everything else
+      # (plain-text create, list, delete, ...) falls through to mmctl.
+      if [[ "${2:-}" == "create" ]] && printf '%s\n' "${@:3}" | grep -qx -- "--file"; then
+        shift 2
+        cmd_post_create "$@"
+      else
+        load_config
+        if [[ -z "${MM_URL:-}" ]]; then
+          fail "Not configured yet."
+          hint "Run: mmsso setup"
+          exit 1
+        fi
+        local mmctl_path
+        if ! mmctl_path=$(find_mmctl); then
+          fail "mmctl is not installed."
+          exit 1
+        fi
+        do_refresh false >/dev/null 2>&1 || true
+        exec "$mmctl_path" "$@"
+      fi
       ;;
     dms)
       shift
