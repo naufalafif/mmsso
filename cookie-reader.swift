@@ -9,19 +9,55 @@ import SQLite3
 // 3. Read encrypted cookie from Chrome's SQLite database
 // 4. Decrypt AES-128-CBC (IV: 16 spaces)
 
+func fail(_ msg: String) -> Never {
+    FileHandle.standardError.write(Data("ERROR: \(msg)\n".utf8))
+    exit(1)
+}
+
+let chromeDir = NSHomeDirectory() + "/Library/Application Support/Google/Chrome"
+
+// Profile folders ("Default", "Profile 1", "Profile 8", ...) that have a cookie DB.
+func profileDirs() -> [String] {
+    let entries = (try? FileManager.default.contentsOfDirectory(atPath: chromeDir)) ?? []
+    return entries
+        .filter { $0 == "Default" || $0.hasPrefix("Profile ") }
+        .filter { FileManager.default.fileExists(atPath: "\(chromeDir)/\($0)/Cookies") }
+        .sorted { a, b in
+            if a == "Default" { return true }
+            if b == "Default" { return false }
+            return a.localizedStandardCompare(b) == .orderedAscending
+        }
+}
+
+// Prints one line per profile: <folder>\t<display name>\t<signed-in account>
+func listProfiles() -> Never {
+    var info: [String: Any] = [:]
+    if let data = FileManager.default.contents(atPath: chromeDir + "/Local State"),
+       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+       let profile = json["profile"] as? [String: Any],
+       let cache = profile["info_cache"] as? [String: Any] {
+        info = cache
+    }
+    for dir in profileDirs() {
+        let entry = info[dir] as? [String: Any]
+        let name = (entry?["name"] as? String) ?? dir
+        let account = (entry?["user_name"] as? String) ?? ""
+        print("\(dir)\t\(name)\t\(account)")
+    }
+    exit(0)
+}
+
 let args = CommandLine.arguments
+if args.count >= 2 && args[1] == "--list-profiles" {
+    listProfiles()
+}
 guard args.count >= 3 else {
-    FileHandle.standardError.write(Data("Usage: cookie-reader <domain> <cookie-name>\n".utf8))
+    FileHandle.standardError.write(Data("Usage: cookie-reader <domain> <cookie-name>\n       cookie-reader --list-profiles\nEnv: MMSSO_CHROME_PROFILE=<folder> reads only that profile (e.g. \"Profile 8\")\n".utf8))
     exit(1)
 }
 
 let domain = args[1]
 let cookieName = args[2]
-
-func fail(_ msg: String) -> Never {
-    FileHandle.standardError.write(Data("ERROR: \(msg)\n".utf8))
-    exit(1)
-}
 
 // Step 1: Read Chrome Safe Storage key from Keychain via `security` CLI
 func getChromeKey() -> String {
@@ -92,26 +128,37 @@ func deriveKey(password: String) -> [UInt8] {
 struct CookieResult {
     let encryptedValue: Data
     let dbVersion: Int
+    let expiresUtc: Int64
 }
 
+// With MMSSO_CHROME_PROFILE set, read only that profile. Otherwise search every
+// profile and take the cookie that expires last (the most recent login).
 func readEncryptedCookie(domain: String, name: String) -> CookieResult? {
-    let cookiePaths = [
-        NSHomeDirectory() + "/Library/Application Support/Google/Chrome/Default/Cookies",
-        NSHomeDirectory() + "/Library/Application Support/Google/Chrome/Profile 1/Cookies"
-    ]
-
-    var dbPath: String?
-    for path in cookiePaths {
-        if FileManager.default.fileExists(atPath: path) {
-            dbPath = path
-            break
+    let pinned = ProcessInfo.processInfo.environment["MMSSO_CHROME_PROFILE"] ?? ""
+    let dirs: [String]
+    if !pinned.isEmpty {
+        guard FileManager.default.fileExists(atPath: "\(chromeDir)/\(pinned)/Cookies") else {
+            fail("Chrome profile '\(pinned)' has no cookie database. Run: mmsso profile")
         }
+        dirs = [pinned]
+    } else {
+        dirs = profileDirs()
     }
-
-    guard let path = dbPath else {
+    guard !dirs.isEmpty else {
         fail("Chrome cookie database not found. Is Chrome installed and has it been opened?")
     }
 
+    var best: CookieResult?
+    for dir in dirs {
+        if let r = readCookie(dbPath: "\(chromeDir)/\(dir)/Cookies", domain: domain, name: name),
+           best == nil || r.expiresUtc > best!.expiresUtc {
+            best = r
+        }
+    }
+    return best
+}
+
+func readCookie(dbPath path: String, domain: String, name: String) -> CookieResult? {
     var db: OpaquePointer?
     guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
         fail("Cannot open Chrome cookie database. Make sure Chrome is closed or try again.")
@@ -128,7 +175,7 @@ func readEncryptedCookie(domain: String, name: String) -> CookieResult? {
         sqlite3_finalize(verStmt)
     }
 
-    let sql = "SELECT encrypted_value FROM cookies WHERE host_key LIKE ? AND name = ? ORDER BY expires_utc DESC LIMIT 1"
+    let sql = "SELECT encrypted_value, expires_utc FROM cookies WHERE host_key LIKE ? AND name = ? ORDER BY expires_utc DESC LIMIT 1"
     var stmt: OpaquePointer?
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
         fail("Failed to query Chrome cookie database.")
@@ -151,7 +198,8 @@ func readEncryptedCookie(domain: String, name: String) -> CookieResult? {
 
     return CookieResult(
         encryptedValue: Data(bytes: blobPtr, count: Int(blobLength)),
-        dbVersion: dbVersion
+        dbVersion: dbVersion,
+        expiresUtc: sqlite3_column_int64(stmt, 1)
     )
 }
 

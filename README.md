@@ -77,6 +77,9 @@ mmsso user search <user-id-or-username> --json
 | `mmsso setup` | Interactive first-time setup |
 | `mmsso status` | Show auth status, token age, server info |
 | `mmsso refresh` | Force-refresh the token from Chrome |
+| `mmsso profile` | Pick which Chrome profile to read the session from (↑/↓ + Enter) |
+| `mmsso profile <folder\|auto>` | Set it directly, e.g. `"Profile 8"`; `auto` searches every profile |
+| `mmsso profile --list` | List Chrome profiles with their signed-in account |
 | `mmsso search <terms>` | Full-text search across channels you have access to |
 | `mmsso dms` | List your direct message channels |
 | `mmsso dm <username>` | Read messages from a DM channel |
@@ -118,6 +121,17 @@ When you log into Mattermost via SSO in Chrome, Chrome stores your session token
         └────────────────────────────┘
 ```
 
+### Multiple Chrome profiles
+
+If you use more than one Chrome profile (say, personal and work), Mattermost is usually logged in on only one of them. `mmsso setup` asks which one when it finds more than one, and you can change it any time:
+
+```bash
+mmsso profile           # arrow-key picker
+mmsso profile --list    # Default / Profile 1 / Profile 8 … with names and accounts
+```
+
+With no profile pinned (`auto`), `cookie-reader` checks every profile and uses the `MMAUTHTOKEN` cookie that expires last, which is the most recent login. The choice is saved as `CHROME_PROFILE` in `~/.config/mmsso/config`. `cookie-reader` also honours `MMSSO_CHROME_PROFILE=<folder>` directly.
+
 ### Why it needs Keychain access
 
 Chrome encrypts cookies with a key stored in the macOS Keychain. To decrypt your session token, `cookie-reader` needs to read that key. The first time you run it, macOS will show a prompt:
@@ -144,7 +158,7 @@ All config stored in `~/.config/mmsso/`:
 
 | File | Purpose |
 |------|---------|
-| `config` | Server URL + auth name |
+| `config` | Server URL, auth name, Chrome profile |
 | `token` | Session token (auto-managed, chmod 600) |
 
 ## Limitations
